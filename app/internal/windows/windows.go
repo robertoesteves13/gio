@@ -241,18 +241,20 @@ const (
 )
 
 type Variant struct {
+	_ structs.HostLayout
+
 	VT        VARIANT_TYPE
 	Reserved1 uint16
 	Reserved2 uint16
 	Reserved3 uint16
 	Val       uintptr
-	padding   uintptr // HACK: guarantee proper size on x64
+	_         uintptr // HACK: guarantee proper size on x64
 }
 
 type IUnknownVTable struct {
 	_              structs.HostLayout
-	AddRef         uintptr
 	QueryInterface uintptr
+	AddRef         uintptr
 	Release        uintptr
 }
 
@@ -706,22 +708,22 @@ type IRawElementProviderSimpleVTable struct {
 	_ structs.HostLayout
 	IUnknownVTable
 
-	Get_HostRawElementProvider uintptr
 	Get_ProviderOptions        uintptr
 	GetPatternProvider         uintptr
 	GetPropertyValue           uintptr
+	Get_HostRawElementProvider uintptr
 }
 
 type IRawElementProviderFragmentVTable struct {
 	_ structs.HostLayout
 	IUnknownVTable
 
-	Get_BoundingRectangle    uintptr
-	Get_FragmentRoot         uintptr
-	GetEmbeddedFragmentRoots uintptr
-	GetRuntimeId             uintptr
 	Navigate                 uintptr
+	GetRuntimeId             uintptr
+	Get_BoundingRectangle    uintptr
+	GetEmbeddedFragmentRoots uintptr
 	SetFocus                 uintptr
+	Get_FragmentRoot         uintptr
 }
 
 type IRawElementProviderFragmentRootVTable struct {
@@ -743,23 +745,23 @@ type IValueProviderVTable struct {
 	_ structs.HostLayout
 	IUnknownVTable
 
-	Get_IsReadOnly uintptr
-	Get_Value      uintptr
 	SetValue       uintptr
+	Get_Value      uintptr
+	Get_IsReadOnly uintptr
 }
 
 type IScrollProviderVTable struct {
 	_ structs.HostLayout
 	IUnknownVTable
 
-	Get_HorizontallyScrollable  uintptr
-	Get_HorizontalScrollPercent uintptr
-	Get_HorizontalViewSize      uintptr
-	Get_VerticallyScrollable    uintptr
-	Get_VerticalScrollPercent   uintptr
-	Get_VerticalViewSize        uintptr
 	Scroll                      uintptr
 	SetScrollPercent            uintptr
+	Get_HorizontalScrollPercent uintptr
+	Get_VerticalScrollPercent   uintptr
+	Get_HorizontalViewSize      uintptr
+	Get_VerticalViewSize        uintptr
+	Get_HorizontallyScrollable  uintptr
+	Get_VerticallyScrollable    uintptr
 }
 
 type SemanticVTable struct {
@@ -788,17 +790,17 @@ const (
 	COINIT_APARTMENTTHREADED = 0x2
 	COINIT_DISABLE_OLE1DDE   = 0x4
 
-	S_OK           = 0x00000000
-	E_ABORT        = 0x80004004
-	E_ACCESSDENIED = 0x80070005
-	E_FAIL         = 0x80004005
-	E_HANDLE       = 0x80070006
-	E_INVALIDARG   = 0x80070057
-	E_NOINTERFACE  = 0x80004002
-	E_NOTIMPL      = 0x80004001
-	E_OUTOFMEMORY  = 0x8007000E
-	E_POINTER      = 0x80004003
-	E_UNEXPECTED   = 0x8000FFFF
+	S_OK           = uintptr(0x00000000)
+	E_ABORT        = uintptr(0x80004004)
+	E_ACCESSDENIED = uintptr(0x80070005)
+	E_FAIL         = uintptr(0x80004005)
+	E_HANDLE       = uintptr(0x80070006)
+	E_INVALIDARG   = uintptr(0x80070057)
+	E_NOINTERFACE  = uintptr(0x80004002)
+	E_NOTIMPL      = uintptr(0x80004001)
+	E_OUTOFMEMORY  = uintptr(0x8007000E)
+	E_POINTER      = uintptr(0x80004003)
+	E_UNEXPECTED   = uintptr(0x8000FFFF)
 )
 
 const (
@@ -1280,7 +1282,7 @@ func UiaReturnRawElementProvider(hwnd syscall.Handle, wParam uintptr, lParam uin
 		uintptr(hwnd),
 		wParam,
 		lParam,
-		uintptr(unsafe.Pointer(el)),
+		uintptr(el),
 	)
 
 	return w
@@ -1326,7 +1328,7 @@ func UiaRaiseNotificationEvent(
 	return nil
 }
 
-func UiaRaiseAutomationEvent(pProvider *IRawElementProviderSimpleVTable, id UiaEventId) uintptr {
+func UiaRaiseAutomationEvent(pProvider unsafe.Pointer, id UiaEventId) uintptr {
 	r, _, _ := _UiaRaiseAutomationEvent.Call(
 		uintptr(unsafe.Pointer(pProvider)),
 		uintptr(id),
@@ -1340,12 +1342,12 @@ func UiaRaiseAutomationEvent(pProvider *IRawElementProviderSimpleVTable, id UiaE
 }
 
 func UiaRaiseAutomationPropertyChangedEvent(
-	pProvider *IRawElementProviderSimpleVTable,
+	pProvider unsafe.Pointer,
 	id UiaPropertyId,
 	oldV, newV *Variant,
 ) uintptr {
 	r, _, _ := _UiaRaiseAutomationPropertyChangedEvent.Call(
-		uintptr(unsafe.Pointer(pProvider)),
+		uintptr(pProvider),
 		uintptr(id),
 		uintptr(unsafe.Pointer(oldV)),
 		uintptr(unsafe.Pointer(newV)),
@@ -1359,7 +1361,7 @@ func UiaRaiseAutomationPropertyChangedEvent(
 }
 
 func UiaRaiseStructureChangedEvent(
-	pProvider *IRawElementProviderSimpleVTable,
+	pProvider unsafe.Pointer,
 	structureChangeType StructureChangeType,
 	pRuntimeId unsafe.Pointer,
 	cRuntimeIdLen uintptr,
@@ -1372,6 +1374,7 @@ func UiaRaiseStructureChangedEvent(
 	)
 
 	if r != S_OK {
+		fmt.Println(r)
 		return r
 	}
 
