@@ -61,15 +61,7 @@ type window struct {
 	frameDims image.Point
 	loop      *eventLoop
 
-	semantic struct {
-		shadowTree map[input.SemanticID]*uiaNode
-		hover      input.SemanticID
-		focus      input.SemanticID
-		root       *uiaNode
-		diffsID    []input.SemanticID
-
-		pinner *runtime.Pinner
-	}
+	semantic UIASemantic
 }
 
 const _WM_WAKEUP = windows.WM_USER + iota
@@ -119,8 +111,7 @@ func newWindow(win *callbacks, options []Option) {
 		}
 
 		w.semantic.diffsID = make([]input.SemanticID, 0)
-		w.semantic.shadowTree = make(map[input.SemanticID]*uiaNode)
-		w.semantic.pinner = &runtime.Pinner{}
+		w.semantic.shadowTree = make(map[input.SemanticID]*UIANode)
 		w.loop = newEventLoop(w.w, w.wakeup)
 		w.w.SetDriver(w)
 		err := w.init()
@@ -225,6 +216,7 @@ func (w *window) init() error {
 		return err
 	}
 	w.hwnd = hwnd
+	w.semantic.hwnd = hwnd
 	return nil
 }
 
@@ -406,8 +398,11 @@ func windowProc(hwnd syscall.Handle, msg uint32, wParam, lParam uintptr) uintptr
 	case windows.WM_GETOBJECT:
 		// UiaRootObjectId
 		if lParam == 0xFFFFFFFC {
-			rootProvider := unsafe.Pointer(&w.semantic.root.VT.Simple)
-			return windows.UiaReturnRawElementProvider(hwnd, wParam, lParam, rootProvider)
+			node, ok := w.semantic.Get(w.semantic.root)
+			if ok {
+				rootProvider := unsafe.Pointer(node.ToSimplePointer())
+				return windows.UiaReturnRawElementProvider(hwnd, wParam, lParam, rootProvider)
+			}
 		}
 	case windows.WM_GETMINMAXINFO:
 		mm := (*windows.MinMaxInfo)(unsafe.Pointer(lParam))
@@ -1330,78 +1325,122 @@ func unregisterSchemes(appid string, schemes []string) {
 }
 
 func (w *window) handleUIAutomation() {
-	if w.semantic.root == nil {
-		rootID := w.w.SemanticRoot()
-		node, _ := w.w.LookupSemantic(rootID)
-		w.semantic.root = newNode(&node, w)
-	}
-
-	if newR, oldR := w.w.SemanticRoot(), w.semantic.root.node.ID; newR != oldR {
-		// FIXME: tell windows about the updates
+	if newR, oldR := w.w.SemanticRoot(), w.semantic.root; newR != oldR {
 		if oldR == w.semantic.hover {
 			w.semantic.hover = newR
 		}
 		if oldR == w.semantic.focus {
 			w.semantic.focus = newR
 		}
-		w.semantic.root.node.ID = newR
+		w.semantic.root = newR
 	}
 
 	w.semantic.diffsID = w.w.AppendSemanticDiffs(w.semantic.diffsID[:0])
 	for _, id := range w.semantic.diffsID {
-		node, _ := w.w.LookupSemantic(id)
-		if _, exists := w.semantic.shadowTree[node.ID]; !exists {
-			n := newNode(&node, w)
-			w.semantic.shadowTree[node.ID] = n
-			windows.UiaRaiseStructureChangedEvent(unsafe.Pointer(&n.VT.Simple), windows.StructureChangeType_ChildAdded, nil, 0)
-			continue
-		}
-
-		old := w.semantic.shadowTree[node.ID]
-		if old.node.Desc.Label != node.Desc.Label {
-			oldV, newV := windows.Variant{}, windows.Variant{}
-			oldV.SetString(old.node.Desc.Label)
-			newV.SetString(node.Desc.Label)
-
-			windows.UiaRaiseAutomationPropertyChangedEvent(unsafe.Pointer(&old.VT.Simple), windows.UIA_NamePropertyId, &oldV, &newV)
-		}
-
-		if slices.EqualFunc(old.node.Children, node.Children, func(s1, s2 input.SemanticNode) bool {
-			return s1.ID == s2.ID
-		}) {
-			windows.UiaRaiseStructureChangedEvent(unsafe.Pointer(&old.VT.Simple), windows.StructureChangeType_ChildrenInvalidated, nil, 0)
+		node, exists := w.w.LookupSemantic(id)
+		if exists {
+			w.semantic.InsertOrUpdate(node)
 		}
 	}
 }
 
-type uiaNode struct {
+type UIANode struct {
 	_ structs.HostLayout
 
-	VT       windows.SemanticVTable
-	refCount int32
+	Simple       *windows.IRawElementProviderSimpleVTable
+	Fragment     *windows.IRawElementProviderFragmentVTable
+	FragmentRoot *windows.IRawElementProviderFragmentRootVTable
+	Invoke       *windows.IInvokeProviderVTable
+	Value        *windows.IValueProviderVTable
+	Scroll       *windows.IScrollProviderVTable
 
-	node *input.SemanticNode
-	w    *window
+	refCount int64
+
+	node     input.SemanticNode
+	semantic *UIASemantic
 }
 
-func newNode(node *input.SemanticNode, w *window) *uiaNode {
-	this := &uiaNode{node: node, refCount: 1, w: w}
+func newNode(node input.SemanticNode, sem *UIASemantic) *UIANode {
+	this := &UIANode{node: node, refCount: 1, semantic: sem}
 
-	this.VT.Simple = &globalSimpleVTable
-	this.VT.Fragment = &globalFragmentVTable
+	this.Simple = &globalSimpleVTable
+	this.Fragment = &globalFragmentVTable
 
 	if node.ParentID == 0 {
-		this.VT.FragmentRoot = &globalFragmentRootVTable
+		this.FragmentRoot = &globalFragmentRootVTable
 	}
 
 	if node.Desc.Class == semantic.Button {
-		this.VT.Invoke = &globalInvokeVTable
+		this.Invoke = &globalInvokeVTable
 	} else if node.Desc.Class == semantic.Editor {
-		this.VT.Value = &globalValueVTable
+		this.Value = &globalValueVTable
 	}
 
-	w.semantic.pinner.Pin(this)
 	return this
+}
+
+func (node *UIANode) IsRoot() bool {
+	return node.node.ID == node.semantic.root
+}
+
+func (node *UIANode) ToSimplePointer() uintptr {
+	offset := unsafe.Offsetof(UIANode{}.Simple)
+	return uintptr(unsafe.Pointer(node)) + offset
+}
+
+func (node *UIANode) ToFragmentPointer() uintptr {
+	offset := unsafe.Offsetof(UIANode{}.Fragment)
+	return uintptr(unsafe.Pointer(node)) + offset
+}
+
+func (node *UIANode) ToFragmentRootPointer() uintptr {
+	offset := unsafe.Offsetof(UIANode{}.FragmentRoot)
+	return uintptr(unsafe.Pointer(node)) + offset
+}
+
+func (node *UIANode) ToInvokePointer() uintptr {
+	offset := unsafe.Offsetof(UIANode{}.Invoke)
+	return uintptr(unsafe.Pointer(node)) + offset
+}
+
+func (node *UIANode) ToValuePointer() uintptr {
+	offset := unsafe.Offsetof(UIANode{}.Value)
+	return uintptr(unsafe.Pointer(node)) + offset
+}
+
+func (node *UIANode) ToScrollPointer() uintptr {
+	offset := unsafe.Offsetof(UIANode{}.Scroll)
+	return uintptr(unsafe.Pointer(node)) + offset
+}
+
+func FromSimplePointer(ptr uintptr) *UIANode {
+	offset := unsafe.Offsetof(UIANode{}.Simple)
+	return (*UIANode)(unsafe.Pointer(ptr - offset))
+}
+
+func FromFragmentPointer(ptr uintptr) *UIANode {
+	offset := unsafe.Offsetof(UIANode{}.Fragment)
+	return (*UIANode)(unsafe.Pointer(ptr - offset))
+}
+
+func FromFragmentRootPointer(ptr uintptr) *UIANode {
+	offset := unsafe.Offsetof(UIANode{}.FragmentRoot)
+	return (*UIANode)(unsafe.Pointer(ptr - offset))
+}
+
+func FromInvokePointer(ptr uintptr) *UIANode {
+	offset := unsafe.Offsetof(UIANode{}.Invoke)
+	return (*UIANode)(unsafe.Pointer(ptr - offset))
+}
+
+func FromValuePointer(ptr uintptr) *UIANode {
+	offset := unsafe.Offsetof(UIANode{}.Value)
+	return (*UIANode)(unsafe.Pointer(ptr - offset))
+}
+
+func FromScrollPointer(ptr uintptr) *UIANode {
+	offset := unsafe.Offsetof(UIANode{}.Scroll)
+	return (*UIANode)(unsafe.Pointer(ptr - offset))
 }
 
 func _ElementProviderFromPoint_ASM() uintptr
@@ -1464,65 +1503,62 @@ var (
 	}
 )
 
-func (this *uiaNode) AddRef() uintptr {
-	return uintptr(atomic.AddInt32(&this.refCount, 1))
+func (node *UIANode) AddRef() uintptr {
+	return uintptr(atomic.AddInt64(&node.refCount, 1))
 }
 
-func (this *uiaNode) QueryInterface(riid windows.GUID, rVal *uintptr) uintptr {
+func (node *UIANode) QueryInterface(riid windows.GUID, rVal *uintptr) uintptr {
 	if rVal == nil {
 		return windows.E_INVALIDARG
 	}
 
-	if this.VT.Simple != nil && riid == windows.IID_IUnknown {
-		*rVal = uintptr(unsafe.Pointer(&this.VT.Simple))
-		this.AddRef()
+	if node.Simple != nil && riid == windows.IID_IUnknown {
+		*rVal = node.ToSimplePointer()
+		node.AddRef()
 		return windows.S_OK
-	} else if this.VT.Simple != nil && riid == windows.IID_IRawElementProviderSimple {
-		*rVal = uintptr(unsafe.Pointer(&this.VT.Simple))
-		this.AddRef()
+	} else if node.Simple != nil && riid == windows.IID_IRawElementProviderSimple {
+		*rVal = node.ToSimplePointer()
+		node.AddRef()
 		return windows.S_OK
-	} else if this.VT.Fragment != nil && riid == windows.IID_IRawElementProviderFragment {
-		*rVal = uintptr(unsafe.Pointer(&this.VT.Fragment))
-		this.AddRef()
+	} else if node.Fragment != nil && riid == windows.IID_IRawElementProviderFragment {
+		*rVal = node.ToFragmentPointer()
+		node.AddRef()
 		return windows.S_OK
-	} else if this.VT.FragmentRoot != nil && riid == windows.IID_IRawElementProviderFragmentRoot {
-		fmt.Println("FragmentRoot")
-		*rVal = uintptr(unsafe.Pointer(&this.VT.FragmentRoot))
-		this.AddRef()
+	} else if node.FragmentRoot != nil && riid == windows.IID_IRawElementProviderFragmentRoot {
+		*rVal = node.ToFragmentRootPointer()
+		node.AddRef()
 		return windows.S_OK
-	} else if this.VT.Invoke != nil && riid == windows.IID_IInvokeProvider {
-		*rVal = uintptr(unsafe.Pointer(&this.VT.Invoke))
-		this.AddRef()
+	} else if node.Invoke != nil && riid == windows.IID_IInvokeProvider {
+		*rVal = node.ToInvokePointer()
+		node.AddRef()
 		return windows.S_OK
-	} else if this.VT.Value != nil && riid == windows.IID_IValueProvider {
-		*rVal = uintptr(unsafe.Pointer(&this.VT.Value))
-		this.AddRef()
+	} else if node.Value != nil && riid == windows.IID_IValueProvider {
+		*rVal = node.ToValuePointer()
+		node.AddRef()
 		return windows.S_OK
-	} else if this.VT.Scroll != nil && riid == windows.IID_IScrollProvider {
-		*rVal = uintptr(unsafe.Pointer(&this.VT.Scroll))
-		this.AddRef()
+	} else if node.Scroll != nil && riid == windows.IID_IScrollProvider {
+		*rVal = node.ToScrollPointer()
+		node.AddRef()
 		return windows.S_OK
 	} else {
 		return windows.E_NOINTERFACE
 	}
 }
 
-func (this *uiaNode) Release() uintptr {
-	return uintptr(atomic.AddInt32(&this.refCount, -1))
+func (node *UIANode) Release() uintptr {
+	newVal := atomic.AddInt64(&node.refCount, -1)
+	return uintptr(newVal)
 }
 
 func _get_HostRawElementProvider(pThis uintptr, retVal *uintptr) uintptr {
-	offsetInVT := unsafe.Offsetof(windows.SemanticVTable{}.Simple)
-	offsetOfVT := unsafe.Offsetof(uiaNode{}.VT)
-	ptr := pThis - offsetInVT - offsetOfVT
-	this := (*uiaNode)(unsafe.Pointer(ptr))
+	this := FromSimplePointer(pThis)
 
 	if retVal == nil {
 		return windows.E_INVALIDARG
 	}
 
-	if this.node.ParentID == 0 {
-		return windows.UiaHostProviderFromHwnd(this.w.hwnd, retVal)
+	if this.IsRoot() {
+		return windows.UiaHostProviderFromHwnd(this.semantic.hwnd, retVal)
 	}
 
 	*retVal = 0
@@ -1539,10 +1575,7 @@ func _get_ProviderOptions(pThis uintptr, retVal *windows.ProviderOptions) uintpt
 }
 
 func _GetPatternProvider(pThis uintptr, patternIDArg uintptr, retVal *uintptr) uintptr {
-	offsetInVT := unsafe.Offsetof(windows.SemanticVTable{}.Simple)
-	offsetOfVT := unsafe.Offsetof(uiaNode{}.VT)
-	ptr := pThis - offsetInVT - offsetOfVT
-	this := (*uiaNode)(unsafe.Pointer(ptr))
+	this := FromSimplePointer(pThis)
 
 	if retVal == nil {
 		return windows.E_POINTER
@@ -1555,15 +1588,15 @@ func _GetPatternProvider(pThis uintptr, patternIDArg uintptr, retVal *uintptr) u
 	switch patternID {
 	case windows.UIA_InvokePatternId:
 		if (this.node.Desc.Gestures & input.ClickGesture) != 0 {
-			*retVal = uintptr(unsafe.Pointer(&this.VT.Invoke))
+			*retVal = this.ToInvokePointer()
 		}
 	case windows.UIA_ScrollPatternId:
 		if (this.node.Desc.Gestures & input.ScrollGesture) != 0 {
-			*retVal = uintptr(unsafe.Pointer(&this.VT.Scroll))
+			*retVal = this.ToScrollPointer()
 		}
 	case windows.UIA_ValuePatternId:
 		if this.node.Desc.Class == semantic.Editor {
-			*retVal = uintptr(unsafe.Pointer(&this.VT.Value))
+			*retVal = this.ToValuePointer()
 		}
 	}
 
@@ -1575,11 +1608,7 @@ func _GetPatternProvider(pThis uintptr, patternIDArg uintptr, retVal *uintptr) u
 }
 
 func _GetPropertyValue(pThis uintptr, propIDArg uintptr, retVal *windows.Variant) uintptr {
-	fmt.Println("GetPropertyValue")
-	offsetInVT := unsafe.Offsetof(windows.SemanticVTable{}.Simple)
-	offsetOfVT := unsafe.Offsetof(uiaNode{}.VT)
-	ptr := pThis - offsetInVT - offsetOfVT
-	this := (*uiaNode)(unsafe.Pointer(ptr))
+	this := FromSimplePointer(pThis)
 
 	if retVal == nil {
 		return windows.E_POINTER
@@ -1625,10 +1654,7 @@ func mapGioClassToUIA(c semantic.ClassOp) windows.UiaControlTypeId {
 }
 
 func _Get_BoundingRectangle(pThis uintptr, rect *windows.UiaRect) uintptr {
-	offsetInVT := unsafe.Offsetof(windows.SemanticVTable{}.Fragment)
-	offsetOfVT := unsafe.Offsetof(uiaNode{}.VT)
-	ptr := pThis - offsetInVT - offsetOfVT
-	this := (*uiaNode)(unsafe.Pointer(ptr))
+	this := FromFragmentPointer(pThis)
 
 	if rect == nil {
 		return windows.E_INVALIDARG
@@ -1645,18 +1671,19 @@ func _Get_BoundingRectangle(pThis uintptr, rect *windows.UiaRect) uintptr {
 }
 
 func _Get_FragmentRoot(pThis uintptr, retVal *uintptr) uintptr {
-	offsetInVT := unsafe.Offsetof(windows.SemanticVTable{}.Fragment)
-	offsetOfVT := unsafe.Offsetof(uiaNode{}.VT)
-	ptr := pThis - offsetInVT - offsetOfVT
-	this := (*uiaNode)(unsafe.Pointer(ptr))
+	this := FromFragmentPointer(pThis)
 
 	if retVal == nil {
 		return windows.E_INVALIDARG
 	}
 
-	*retVal = uintptr(unsafe.Pointer(&this.w.semantic.root.VT.FragmentRoot))
-	this.w.semantic.root.AddRef()
+	rootNode, ok := this.semantic.Get(this.semantic.root)
+	if !ok {
+		return windows.E_FAIL
+	}
 
+	*retVal = rootNode.ToFragmentPointer()
+	rootNode.AddRef()
 	return windows.S_OK
 }
 
@@ -1670,11 +1697,7 @@ func _GetEmbeddedFragmentRoots(pThis uintptr, retVal *uintptr) uintptr {
 }
 
 func _GetRuntimeId(pThis uintptr, retVal *uintptr) uintptr {
-	fmt.Println("GetRuntimeId")
-	offsetInVT := unsafe.Offsetof(windows.SemanticVTable{}.Fragment)
-	offsetOfVT := unsafe.Offsetof(uiaNode{}.VT)
-	ptr := pThis - offsetInVT - offsetOfVT
-	this := (*uiaNode)(unsafe.Pointer(ptr))
+	this := FromFragmentPointer(pThis)
 
 	if retVal == nil {
 		return windows.E_POINTER
@@ -1695,76 +1718,76 @@ func _GetRuntimeId(pThis uintptr, retVal *uintptr) uintptr {
 }
 
 func _Navigate(pThis uintptr, direction windows.NavigateDirection, retVal *uintptr) uintptr {
-	offsetInVT := unsafe.Offsetof(windows.SemanticVTable{}.Fragment)
-	offsetOfVT := unsafe.Offsetof(uiaNode{}.VT)
-	ptr := pThis - offsetInVT - offsetOfVT
-	this := (*uiaNode)(unsafe.Pointer(ptr))
+	this := FromFragmentPointer(pThis)
 
 	if retVal == nil {
 		return windows.E_INVALIDARG
 	}
 
-	shadowTree := this.w.semantic.shadowTree
 	*retVal = 0
 
-	var resultNode *uiaNode
+	var resultID input.SemanticID
 
 	switch direction {
 	case windows.NavigateDirection_FirstChild:
 		if len(this.node.Children) > 0 {
 			child := this.node.Children[0]
-			resultNode = shadowTree[child.ID]
+			resultID = child.ID
 		}
 	case windows.NavigateDirection_LastChild:
 		if len(this.node.Children) > 0 {
 			child := this.node.Children[len(this.node.Children)-1]
-			resultNode = shadowTree[child.ID]
+			resultID = child.ID
 		}
 	case windows.NavigateDirection_NextSibling:
 		if this.node.ParentID != 0 {
-			parent := shadowTree[this.node.ParentID]
-			for i := range parent.node.Children {
-				if parent.node.Children[i].ID == this.node.ID {
-					if (i + 1) < len(parent.node.Children) {
-						resultNode = shadowTree[parent.node.Children[i+1].ID]
+			parent, ok := this.semantic.Get(this.node.ParentID)
+			if ok {
+				for i := range parent.node.Children {
+					if parent.node.Children[i].ID == this.node.ID {
+						if (i + 1) < len(parent.node.Children) {
+							resultID = parent.node.Children[i+1].ID
+						}
+						break
 					}
-					break
 				}
 			}
 		}
 	case windows.NavigateDirection_Parent:
 		if this.node.ParentID != 1 {
-			resultNode = shadowTree[this.node.ParentID]
+			resultID = this.node.ParentID
 		} else {
-			resultNode = this.w.semantic.root
+			resultID = this.semantic.root
 		}
 	case windows.NavigateDirection_PreviousSibling:
 		if this.node.ParentID != 0 {
-			parent := shadowTree[this.node.ParentID]
-			for i := range parent.node.Children {
-				if parent.node.Children[i].ID == this.node.ID {
-					if (i - 1) >= 0 {
-						resultNode = shadowTree[parent.node.Children[i-1].ID]
+			parent, ok := this.semantic.Get(this.node.ParentID)
+			if ok {
+				for i := range parent.node.Children {
+					if parent.node.Children[i].ID == this.node.ID {
+						if (i - 1) >= 0 {
+							resultID = parent.node.Children[i-1].ID
+						}
+						break
 					}
-					break
 				}
 			}
 		}
 	}
 
-	if resultNode != nil {
-		*retVal = uintptr(unsafe.Pointer(&resultNode.VT.Fragment))
-		resultNode.AddRef()
+	if resultID != 0 {
+		resultNode, ok := this.semantic.Get(resultID)
+		if ok {
+			*retVal = resultNode.ToFragmentPointer()
+			resultNode.AddRef()
+		}
 	}
 
 	return windows.S_OK
 }
 
 func _SetFocus(pThis uintptr) uintptr {
-	// offsetInVT := unsafe.Offsetof(windows.SemanticVTable{}.Fragment)
-	// offsetOfVT := unsafe.Offsetof(uiaNode{}.VT)
-	// ptr := pThis - offsetInVT - offsetOfVT
-	// this := (*uiaNode)(unsafe.Pointer(ptr))
+	// this := FromFragmentPointer(pThis)
 
 	// FIXME: implement
 	fmt.Fprintln(os.Stderr, "_SetFocus: stub")
@@ -1772,33 +1795,27 @@ func _SetFocus(pThis uintptr) uintptr {
 }
 
 func _ElementProviderFromPoint(pThis uintptr, x, y uintptr, retVal *uintptr) uintptr {
-	offsetInVT := unsafe.Offsetof(windows.SemanticVTable{}.FragmentRoot)
-	offsetOfVT := unsafe.Offsetof(uiaNode{}.VT)
-	ptr := pThis - offsetInVT - offsetOfVT
-	this := (*uiaNode)(unsafe.Pointer(ptr))
-
-	if retVal == nil {
-		return windows.E_POINTER
-	}
-
-	p := f32.Pt(float32(x), float32(y))
-	id, exists := this.w.w.SemanticAt(p)
-	if !exists {
-		*retVal = 0
-		return windows.S_OK
-	}
-
-	node := this.w.semantic.shadowTree[id]
-	*retVal = uintptr(unsafe.Pointer(&node.VT.Fragment))
-	node.AddRef()
+	// this := FromFragmentRootPointer(pThis)
+	//
+	// if retVal == nil {
+	// 	return windows.E_POINTER
+	// }
+	//
+	// p := f32.Pt(float32(x), float32(y))
+	// id, exists := this.w.SemanticAt(p)
+	// if !exists {
+	// 	*retVal = 0
+	// 	return windows.S_OK
+	// }
+	//
+	// node := this.w.semantic.shadowTree[id]
+	// *retVal = uintptr(unsafe.Pointer(&node.VT.Fragment))
+	// node.AddRef()
 	return windows.S_OK
 }
 
 func _GetFocus(pThis uintptr, retVal *uintptr) uintptr {
-	// offsetInVT := unsafe.Offsetof(windows.SemanticVTable{}.FragmentRoot)
-	// offsetOfVT := unsafe.Offsetof(uiaNode{}.VT)
-	// ptr := pThis - offsetInVT - offsetOfVT
-	// this := (*uiaNode)(unsafe.Pointer(ptr))
+	// this := FromFragmentRootPointer(pThis)
 
 	// FIXME: implement
 	fmt.Fprintln(os.Stderr, "_GetFocus: stub")
@@ -1807,21 +1824,14 @@ func _GetFocus(pThis uintptr, retVal *uintptr) uintptr {
 }
 
 func _Invoke(pThis uintptr) uintptr {
-	offsetInVT := unsafe.Offsetof(windows.SemanticVTable{}.Invoke)
-	offsetOfVT := unsafe.Offsetof(uiaNode{}.VT)
-	ptr := pThis - offsetInVT - offsetOfVT
-	this := (*uiaNode)(unsafe.Pointer(ptr))
-
-	this.w.w.ClickFocus()
+	// this := FromInvokePointer(pThis)
+	// this.w.w.ClickFocus()
 
 	return windows.S_OK
 }
 
 func _get_IsReadOnly(pThis uintptr, retVal *uintptr) uintptr {
-	offsetInVT := unsafe.Offsetof(windows.SemanticVTable{}.Value)
-	offsetOfVT := unsafe.Offsetof(uiaNode{}.VT)
-	ptr := pThis - offsetInVT - offsetOfVT
-	this := (*uiaNode)(unsafe.Pointer(ptr))
+	this := FromValuePointer(pThis)
 
 	if !this.node.Desc.Disabled {
 		*retVal = ^uintptr(0)
@@ -1833,10 +1843,7 @@ func _get_IsReadOnly(pThis uintptr, retVal *uintptr) uintptr {
 }
 
 func _get_Value(pThis uintptr, retVal **uint16) uintptr {
-	offsetInVT := unsafe.Offsetof(windows.SemanticVTable{}.Value)
-	offsetOfVT := unsafe.Offsetof(uiaNode{}.VT)
-	ptr := pThis - offsetInVT - offsetOfVT
-	this := (*uiaNode)(unsafe.Pointer(ptr))
+	this := FromValuePointer(pThis)
 
 	bstr, err := windows.SysAllocString(this.node.Desc.Label)
 	if err != nil {
@@ -1848,179 +1855,170 @@ func _get_Value(pThis uintptr, retVal **uint16) uintptr {
 }
 
 func _SetValue(pThis uintptr, val *uint16) uintptr {
-	// offsetInVT := unsafe.Offsetof(windows.SemanticVTable{}.Value)
-	// offsetOfVT := unsafe.Offsetof(uiaNode{}.VT)
-	// ptr := pThis - offsetInVT - offsetOfVT
-	// this := (*uiaNode)(unsafe.Pointer(ptr))
+	// this := FromValuePointer(pThis)
 
 	fmt.Fprintln(os.Stderr, "_SetValue: stub")
 	return windows.E_NOTIMPL
 }
 
 func simple_AddRef(pThis uintptr) uintptr {
-	offsetInVT := unsafe.Offsetof(windows.SemanticVTable{}.Simple)
-	offsetOfVT := unsafe.Offsetof(uiaNode{}.VT)
-	ptr := pThis - offsetInVT - offsetOfVT
-	this := (*uiaNode)(unsafe.Pointer(ptr))
+	this := FromSimplePointer(pThis)
 
 	return this.AddRef()
 }
 
 func fragment_AddRef(pThis uintptr) uintptr {
-	offsetInVT := unsafe.Offsetof(windows.SemanticVTable{}.Fragment)
-	offsetOfVT := unsafe.Offsetof(uiaNode{}.VT)
-	ptr := pThis - offsetInVT - offsetOfVT
-	this := (*uiaNode)(unsafe.Pointer(ptr))
+	this := FromFragmentPointer(pThis)
 
 	return this.AddRef()
 }
 
 func fragmentRoot_AddRef(pThis uintptr) uintptr {
-	offsetInVT := unsafe.Offsetof(windows.SemanticVTable{}.FragmentRoot)
-	offsetOfVT := unsafe.Offsetof(uiaNode{}.VT)
-	ptr := pThis - offsetInVT - offsetOfVT
-	this := (*uiaNode)(unsafe.Pointer(ptr))
+	this := FromFragmentRootPointer(pThis)
 
 	return this.AddRef()
 }
 
 func invoke_AddRef(pThis uintptr) uintptr {
-	offsetInVT := unsafe.Offsetof(windows.SemanticVTable{}.Invoke)
-	offsetOfVT := unsafe.Offsetof(uiaNode{}.VT)
-	ptr := pThis - offsetInVT - offsetOfVT
-	this := (*uiaNode)(unsafe.Pointer(ptr))
+	this := FromInvokePointer(pThis)
 
 	return this.AddRef()
 }
 
 func value_AddRef(pThis uintptr) uintptr {
-	offsetInVT := unsafe.Offsetof(windows.SemanticVTable{}.Value)
-	offsetOfVT := unsafe.Offsetof(uiaNode{}.VT)
-	ptr := pThis - offsetInVT - offsetOfVT
-	this := (*uiaNode)(unsafe.Pointer(ptr))
+	this := FromValuePointer(pThis)
 
 	return this.AddRef()
 }
 
 func scroll_AddRef(pThis uintptr) uintptr {
-	offsetInVT := unsafe.Offsetof(windows.SemanticVTable{}.Scroll)
-	offsetOfVT := unsafe.Offsetof(uiaNode{}.VT)
-	ptr := pThis - offsetInVT - offsetOfVT
-	this := (*uiaNode)(unsafe.Pointer(ptr))
+	this := FromScrollPointer(pThis)
 
 	return this.AddRef()
 }
 
 func simple_QueryInterface(pThis uintptr, riid uintptr, rVal *uintptr) uintptr {
-	offsetInVT := unsafe.Offsetof(windows.SemanticVTable{}.Simple)
-	offsetOfVT := unsafe.Offsetof(uiaNode{}.VT)
-	ptr := pThis - offsetInVT - offsetOfVT
-	this := (*uiaNode)(unsafe.Pointer(ptr))
+	this := FromSimplePointer(pThis)
 
 	iid := (*windows.GUID)(unsafe.Pointer(riid))
 	return this.QueryInterface(*iid, rVal)
 }
 
 func fragment_QueryInterface(pThis uintptr, riid uintptr, rVal *uintptr) uintptr {
-	offsetInVT := unsafe.Offsetof(windows.SemanticVTable{}.Fragment)
-	offsetOfVT := unsafe.Offsetof(uiaNode{}.VT)
-	ptr := pThis - offsetInVT - offsetOfVT
-	this := (*uiaNode)(unsafe.Pointer(ptr))
+	this := FromFragmentPointer(pThis)
 
 	iid := (*windows.GUID)(unsafe.Pointer(riid))
 	return this.QueryInterface(*iid, rVal)
 }
 
 func fragmentRoot_QueryInterface(pThis uintptr, riid uintptr, rVal *uintptr) uintptr {
-	offsetInVT := unsafe.Offsetof(windows.SemanticVTable{}.FragmentRoot)
-	offsetOfVT := unsafe.Offsetof(uiaNode{}.VT)
-	ptr := pThis - offsetInVT - offsetOfVT
-	this := (*uiaNode)(unsafe.Pointer(ptr))
+	this := FromFragmentRootPointer(pThis)
 
 	iid := (*windows.GUID)(unsafe.Pointer(riid))
 	return this.QueryInterface(*iid, rVal)
 }
 
 func invoke_QueryInterface(pThis uintptr, riid uintptr, rVal *uintptr) uintptr {
-	offsetInVT := unsafe.Offsetof(windows.SemanticVTable{}.Invoke)
-	offsetOfVT := unsafe.Offsetof(uiaNode{}.VT)
-	ptr := pThis - offsetInVT - offsetOfVT
-	this := (*uiaNode)(unsafe.Pointer(ptr))
+	this := FromInvokePointer(pThis)
 
 	iid := (*windows.GUID)(unsafe.Pointer(riid))
 	return this.QueryInterface(*iid, rVal)
 }
 
 func value_QueryInterface(pThis uintptr, riid uintptr, rVal *uintptr) uintptr {
-	offsetInVT := unsafe.Offsetof(windows.SemanticVTable{}.Value)
-	offsetOfVT := unsafe.Offsetof(uiaNode{}.VT)
-	ptr := pThis - offsetInVT - offsetOfVT
-	this := (*uiaNode)(unsafe.Pointer(ptr))
+	this := FromValuePointer(pThis)
 
 	iid := (*windows.GUID)(unsafe.Pointer(riid))
 	return this.QueryInterface(*iid, rVal)
 }
 
 func scroll_QueryInterface(pThis uintptr, riid uintptr, rVal *uintptr) uintptr {
-	offsetInVT := unsafe.Offsetof(windows.SemanticVTable{}.Scroll)
-	offsetOfVT := unsafe.Offsetof(uiaNode{}.VT)
-	ptr := pThis - offsetInVT - offsetOfVT
-	this := (*uiaNode)(unsafe.Pointer(ptr))
+	this := FromScrollPointer(pThis)
 
 	iid := (*windows.GUID)(unsafe.Pointer(riid))
 	return this.QueryInterface(*iid, rVal)
 }
 
 func simple_Release(pThis uintptr) uintptr {
-	offsetInVT := unsafe.Offsetof(windows.SemanticVTable{}.Simple)
-	offsetOfVT := unsafe.Offsetof(uiaNode{}.VT)
-	ptr := pThis - offsetInVT - offsetOfVT
-	this := (*uiaNode)(unsafe.Pointer(ptr))
-
+	this := FromSimplePointer(pThis)
 	return this.Release()
 }
 
 func fragment_Release(pThis uintptr) uintptr {
-	offsetInVT := unsafe.Offsetof(windows.SemanticVTable{}.Fragment)
-	offsetOfVT := unsafe.Offsetof(uiaNode{}.VT)
-	ptr := pThis - offsetInVT - offsetOfVT
-	this := (*uiaNode)(unsafe.Pointer(ptr))
+	this := FromFragmentPointer(pThis)
 
 	return this.Release()
 }
 
 func fragmentRoot_Release(pThis uintptr) uintptr {
-	offsetInVT := unsafe.Offsetof(windows.SemanticVTable{}.FragmentRoot)
-	offsetOfVT := unsafe.Offsetof(uiaNode{}.VT)
-	ptr := pThis - offsetInVT - offsetOfVT
-	this := (*uiaNode)(unsafe.Pointer(ptr))
+	this := FromFragmentRootPointer(pThis)
 
 	return this.Release()
 }
 
 func invoke_Release(pThis uintptr) uintptr {
-	offsetInVT := unsafe.Offsetof(windows.SemanticVTable{}.Invoke)
-	offsetOfVT := unsafe.Offsetof(uiaNode{}.VT)
-	ptr := pThis - offsetInVT - offsetOfVT
-	this := (*uiaNode)(unsafe.Pointer(ptr))
+	this := FromInvokePointer(pThis)
 
 	return this.Release()
 }
 
 func value_Release(pThis uintptr) uintptr {
-	offsetInVT := unsafe.Offsetof(windows.SemanticVTable{}.Value)
-	offsetOfVT := unsafe.Offsetof(uiaNode{}.VT)
-	ptr := pThis - offsetInVT - offsetOfVT
-	this := (*uiaNode)(unsafe.Pointer(ptr))
+	this := FromValuePointer(pThis)
 
 	return this.Release()
 }
 
 func scroll_Release(pThis uintptr) uintptr {
-	offsetInVT := unsafe.Offsetof(windows.SemanticVTable{}.Scroll)
-	offsetOfVT := unsafe.Offsetof(uiaNode{}.VT)
-	ptr := pThis - offsetInVT - offsetOfVT
-	this := (*uiaNode)(unsafe.Pointer(ptr))
+	this := FromScrollPointer(pThis)
 
 	return this.Release()
+}
+
+type UIASemantic struct {
+	shadowTree map[input.SemanticID]*UIANode
+
+	hover input.SemanticID
+	focus input.SemanticID
+	root  input.SemanticID
+
+	diffsID []input.SemanticID
+
+	hwnd syscall.Handle
+}
+
+func NewUIASemantic() *UIASemantic {
+	return &UIASemantic{
+		diffsID: make([]input.SemanticID, 0),
+	}
+}
+
+func (sem *UIASemantic) InsertOrUpdate(node input.SemanticNode) {
+	old, exists := sem.shadowTree[node.ID]
+	if !exists {
+		uiaNode := newNode(node, sem)
+		sem.shadowTree[node.ID] = uiaNode
+		windows.UiaRaiseStructureChangedEvent(unsafe.Pointer(uiaNode.ToSimplePointer()), windows.StructureChangeType_ChildAdded, nil, 0)
+	} else {
+		if slices.EqualFunc(old.node.Children, node.Children, func(s1, s2 input.SemanticNode) bool {
+			return s1.ID == s2.ID
+		}) {
+			old.node = node
+			windows.UiaRaiseStructureChangedEvent(unsafe.Pointer(old.ToSimplePointer()), windows.StructureChangeType_ChildrenInvalidated, nil, 0)
+		} else {
+			old.node = node
+		}
+	}
+}
+
+func (sem *UIASemantic) Delete(id input.SemanticID) {
+	node, exists := sem.shadowTree[id]
+	if exists {
+		delete(sem.shadowTree, id)
+		windows.UiaRaiseStructureChangedEvent(unsafe.Pointer(node.ToSimplePointer()), windows.StructureChangeType_ChildRemoved, nil, 0)
+	}
+}
+
+func (sem *UIASemantic) Get(id input.SemanticID) (*UIANode, bool) {
+	node, ok := sem.shadowTree[id]
+	return node, ok
 }
