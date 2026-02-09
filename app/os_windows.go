@@ -1677,8 +1677,12 @@ func _Get_BoundingRectangle(pThis uintptr, rect *windows.UiaRect) uintptr {
 		return windows.E_INVALIDARG
 	}
 
-	rect.Top = float64(this.node.Desc.Bounds.Min.Y)
-	rect.Left = float64(this.node.Desc.Bounds.Min.X)
+	var np windows.Point
+
+	windows.ScreenToClient(this.semantic.hwnd, &np)
+
+	rect.Top = float64(this.node.Desc.Bounds.Min.Y - int(np.Y))
+	rect.Left = float64(this.node.Desc.Bounds.Min.X - int(np.X))
 	rect.Width = float64(this.node.Desc.Bounds.Max.X)
 	rect.Height = float64(this.node.Desc.Bounds.Max.Y)
 
@@ -2010,12 +2014,6 @@ type UIASemantic struct {
 	diffsID []input.SemanticID
 
 	hwnd syscall.Handle
-}
-
-func NewUIASemantic() *UIASemantic {
-	return &UIASemantic{
-		diffsID: make([]input.SemanticID, 0),
-	}
 }
 
 func (sem *UIASemantic) InsertOrUpdate(node input.SemanticNode) {
