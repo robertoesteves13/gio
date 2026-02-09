@@ -273,11 +273,24 @@ type GUID struct {
 	Data4_7 uint8
 }
 
+func (g GUID) String() string {
+	return fmt.Sprintf("{%08x-%04x-%04x-%x%x-%x%x%x%x%x%x}",
+		g.Data1,
+		g.Data2,
+		g.Data3,
+		g.Data4_0,
+		g.Data4_1,
+		g.Data4_2,
+		g.Data4_3,
+		g.Data4_4,
+		g.Data4_5,
+		g.Data4_6,
+		g.Data4_7,
+	)
+}
+
 var (
 	IID_IUnknown                        = GUID{structs.HostLayout{}, 0x00000000, 0x0000, 0x0000, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}
-	IID_IUIAutomationElement            = GUID{structs.HostLayout{}, 0xd22108aa, 0x8ac5, 0x49a5, 0x83, 0x7b, 0x37, 0xbb, 0xb3, 0xd7, 0x59, 0x1e}
-	IID_IUIAutomationTogglePattern      = GUID{structs.HostLayout{}, 0x94cf8058, 0x9b8d, 0x4ab9, 0x8b, 0xfd, 0x4c, 0xd0, 0xa3, 0x3c, 0x8c, 0x70}
-	IID_IUIAutomationInvokePattern      = GUID{structs.HostLayout{}, 0xfb377fbe, 0x8ea6, 0x46d5, 0x9c, 0x73, 0x64, 0x99, 0x64, 0x2d, 0x30, 0x59}
 	IID_IRawElementProviderSimple       = GUID{structs.HostLayout{}, 0xd6dd68d1, 0x86fd, 0x4332, 0x86, 0x66, 0x9a, 0xbe, 0xde, 0xa2, 0xd2, 0x4c}
 	IID_IRawElementProviderFragment     = GUID{structs.HostLayout{}, 0xf7063da8, 0x8359, 0x439c, 0x92, 0x97, 0xbb, 0xc5, 0x29, 0x9a, 0x7d, 0x87}
 	IID_IRawElementProviderFragmentRoot = GUID{structs.HostLayout{}, 0x620ce2a5, 0xab8f, 0x40a9, 0x86, 0xcb, 0xde, 0x3c, 0x75, 0x59, 0x9b, 0x58}
@@ -688,22 +701,6 @@ const (
 	FADF_RESERVED    SAFEARRAY_FLAGS = 0xF008
 )
 
-type IUIAutomationTogglePatternVTable struct {
-	_ structs.HostLayout
-	IUnknownVTable
-
-	Get_CachedToggleState  uintptr
-	Get_CurrentToggleState uintptr
-	Toggle                 uintptr
-}
-
-type IUIAutomationInvokePatternVTable struct {
-	_ structs.HostLayout
-	IUnknownVTable
-
-	Invoke uintptr
-}
-
 type IRawElementProviderSimpleVTable struct {
 	_ structs.HostLayout
 	IUnknownVTable
@@ -773,7 +770,7 @@ type SemanticVTable struct {
 	Scroll       *IScrollProviderVTable
 }
 
-type ProviderOptions uint32
+type ProviderOptions int32
 
 const (
 	ProviderOptions_ClientSideProvider     ProviderOptions = 0x1
@@ -1277,15 +1274,15 @@ func SafeArrayDestroy(sa *SAFEARRAY) error {
 	return nil
 }
 
-func UiaReturnRawElementProvider(hwnd syscall.Handle, wParam uintptr, lParam uintptr, el unsafe.Pointer) uintptr {
-	w, _, _ := _UiaReturnRawElementProvider.Call(
+func UiaReturnRawElementProvider(hwnd syscall.Handle, wParam uintptr, lParam uintptr, el uintptr) uintptr {
+	h, _, _ := _UiaReturnRawElementProvider.Call(
 		uintptr(hwnd),
 		wParam,
 		lParam,
 		uintptr(el),
 	)
 
-	return w
+	return h
 }
 
 func UiaRaiseChangesEvent(
@@ -1374,7 +1371,6 @@ func UiaRaiseStructureChangedEvent(
 	)
 
 	if r != S_OK {
-		fmt.Println(r)
 		return r
 	}
 
