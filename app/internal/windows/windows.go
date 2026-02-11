@@ -1248,7 +1248,9 @@ func SafeArrayCreateVector(vt VARIANT_TYPE, lLbound int64, cElements uint64) (*S
 	return sa, nil
 }
 
-func SafeArrayPutElement(sa *SAFEARRAY, rgIndices uint64, pv uintptr) error {
+func SafeArrayPutElement(sa *SAFEARRAY, rgIndices int, value any) error {
+	pv := unsafe.Pointer(&value)
+
 	r, _, _ := _SafeArrayPutElement.Call(
 		uintptr(unsafe.Pointer(sa)),
 		uintptr(unsafe.Pointer(&rgIndices)),

@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	"runtime"
-	"slices"
 	"sort"
 	"strings"
 	"structs"
@@ -87,7 +86,7 @@ var resources struct {
 	handle syscall.Handle
 	// class is the Gio window class from RegisterClassEx.
 	class uint16
-	// cursor is the arrow cursor resource.
+	// cursor is the arrow cursor res.Descriptionource.
 	cursor syscall.Handle
 }
 
@@ -1330,28 +1329,17 @@ func (w *window) handleUIAutomation() {
 		if oldR == w.semantic.focus {
 			w.semantic.focus = newR
 		}
+
+		rootNode, _ := w.w.LookupSemantic(newR)
+		rootNode.Desc.Description = "Window"
 		w.semantic.root = newR
-	}
-
-	// Ensure root node is always in the shadow tree
-	if w.semantic.root != 0 {
-		if _, exists := w.semantic.shadowTree[w.semantic.root]; !exists {
-			if rootNode, ok := w.w.LookupSemantic(w.semantic.root); ok {
-
-				w.semantic.InsertOrUpdate(rootNode)
-			}
-		}
+		w.semantic.InsertOrUpdate(rootNode)
 	}
 
 	w.semantic.diffsID = w.w.AppendSemanticDiffs(w.semantic.diffsID[:0])
-	if len(w.semantic.diffsID) > 0 {
-
-	}
-
 	for _, id := range w.semantic.diffsID {
 		node, exists := w.w.LookupSemantic(id)
 		if exists {
-
 			w.semantic.InsertOrUpdate(node)
 		}
 	}
@@ -1392,6 +1380,84 @@ func newNode(node input.SemanticNode, sem *UIASemantic) *UIANode {
 	}
 
 	return this
+}
+
+func (node *UIANode) Update(newNode input.SemanticNode) {
+	oldNode := node.node
+	node.node = newNode
+
+	if oldNode.Desc.Description != node.node.Desc.Description {
+		var oldV, newV windows.Variant
+		oldV.SetString(oldNode.Desc.Description)
+		newV.SetString(node.node.Desc.Description)
+		windows.UiaRaiseAutomationPropertyChangedEvent(
+			unsafe.Pointer(node.ToSimplePointer()),
+			windows.UIA_NamePropertyId,
+			&oldV, &newV)
+	}
+
+	// if node.node.Desc.Description != newNode.Desc.Description {
+	// 	var oldV, newV windows.Variant
+	// 	oldV.SetString(node.node.Desc.Description)
+	// 	newV.SetString(newNode.Desc.Description)
+	// 	windows.UiaRaiseAutomationPropertyChangedEvent(
+	// 		unsafe.Pointer(node.ToSimplePointer()),
+	// 		windows.UIA_HelpTextPropertyId,
+	// 		&oldV, &newV)
+	// }
+}
+
+func (node *UIANode) GetParent() *UIANode {
+	if n, ok := node.semantic.Get(node.node.ParentID); ok {
+		return n
+	}
+
+	return nil
+}
+
+func (node *UIANode) GetChild(idx int) *UIANode {
+	if idx < 0 || idx >= len(node.node.Children) {
+		return nil
+	}
+
+	child := node.node.Children[idx]
+	if n, ok := node.semantic.Get(child.ID); ok {
+		return n
+	}
+
+	return nil
+}
+
+func (node *UIANode) GetLeftSibling() *UIANode {
+	if parent, ok := node.semantic.Get(node.node.ParentID); ok {
+		i := node.getParentIdxLocation(parent.node)
+		if i > 0 {
+			return parent.GetChild(i - 1)
+		}
+	}
+
+	return nil
+}
+
+func (node *UIANode) GetRightSibling() *UIANode {
+	if parent, ok := node.semantic.Get(node.node.ParentID); ok {
+		i := node.getParentIdxLocation(parent.node)
+		if i >= 0 && i+1 < len(parent.node.Children) {
+			return parent.GetChild(i + 1)
+		}
+	}
+
+	return nil
+}
+
+func (node *UIANode) getParentIdxLocation(parent input.SemanticNode) int {
+	for i, c := range parent.Children {
+		if c.ID == node.node.ID {
+			return i
+		}
+	}
+
+	return -1
 }
 
 func (node *UIANode) IsRoot() bool {
@@ -1527,25 +1593,22 @@ func (node *UIANode) QueryInterface(riid windows.GUID, rVal *uintptr) uintptr {
 
 	switch riid {
 	case windows.IID_IUnknown, windows.IID_IRawElementProviderSimple:
-
 		*rVal = node.ToSimplePointer()
 		node.AddRef()
 		return windows.S_OK
 	case windows.IID_IRawElementProviderFragment:
-
 		*rVal = node.ToFragmentPointer()
 		node.AddRef()
 		return windows.S_OK
 	case windows.IID_IRawElementProviderFragmentRoot:
 		if node.FragmentRoot != nil {
-
 			*rVal = node.ToFragmentRootPointer()
+			node.AddRef()
 			return windows.S_OK
 		} else {
 			*rVal = 0
 			return windows.E_NOINTERFACE
 		}
-
 	default:
 		*rVal = 0
 		return windows.E_NOINTERFACE
@@ -1554,17 +1617,21 @@ func (node *UIANode) QueryInterface(riid windows.GUID, rVal *uintptr) uintptr {
 
 func (node *UIANode) Release() uintptr {
 	newVal := atomic.AddInt64(&node.refCount, -1)
+
+	// if newVal == 0 {
+	// 	delete(node.semantic.shadowTree, node.node.ID)
+	// }
+
 	return uintptr(newVal)
 }
 
 func _get_HostRawElementProvider(pThis uintptr, retVal *uintptr) uintptr {
-	this := FromSimplePointer(pThis)
-
 	if retVal == nil {
 		return windows.E_INVALIDARG
 	}
 
-	return windows.UiaHostProviderFromHwnd(this.semantic.hwnd, retVal)
+	*retVal = 0
+	return windows.S_OK
 }
 
 func _get_ProviderOptions(pThis uintptr, retVal *windows.ProviderOptions) uintptr {
@@ -1572,14 +1639,12 @@ func _get_ProviderOptions(pThis uintptr, retVal *windows.ProviderOptions) uintpt
 		return windows.E_INVALIDARG
 	}
 
-	*retVal = windows.ProviderOptions_ServerSideProvider |
-		windows.ProviderOptions_UseComThreading |
-		windows.ProviderOptions_UseClientCoordinates
+	*retVal = windows.ProviderOptions_ServerSideProvider
+
 	return windows.S_OK
 }
 
 func _GetPatternProvider(pThis uintptr, patternIDArg uintptr, retVal *uintptr) uintptr {
-
 	this := FromSimplePointer(pThis)
 
 	if retVal == nil {
@@ -1594,16 +1659,18 @@ func _GetPatternProvider(pThis uintptr, patternIDArg uintptr, retVal *uintptr) u
 	case windows.UIA_InvokePatternId:
 		if (this.node.Desc.Gestures & input.ClickGesture) != 0 {
 			*retVal = this.ToInvokePointer()
+			this.AddRef()
 
 		}
-	case windows.UIA_ScrollPatternId:
-		if (this.node.Desc.Gestures & input.ScrollGesture) != 0 {
-			*retVal = this.ToScrollPointer()
-
-		}
+	// case windows.UIA_ScrollPatternId:
+	// 	if (this.node.Desc.Gestures & input.ScrollGesture) != 0 {
+	// 		*retVal = this.ToScrollPointer()
+	//
+	// 	}
 	case windows.UIA_ValuePatternId:
 		if this.node.Desc.Class == semantic.Editor {
 			*retVal = this.ToValuePointer()
+			this.AddRef()
 
 		}
 	}
@@ -1616,14 +1683,12 @@ func _GetPatternProvider(pThis uintptr, patternIDArg uintptr, retVal *uintptr) u
 }
 
 func _GetPropertyValue(pThis uintptr, propIDArg uintptr, retVal *windows.Variant) uintptr {
-
 	this := FromSimplePointer(pThis)
-
 	if retVal == nil {
 		return windows.E_POINTER
 	}
 
-	propID := windows.UiaPropertyId(propIDArg)
+	propID := windows.UiaPropertyId(propIDArg & 0xFFFFFFFF)
 
 	switch propID {
 	case windows.UIA_NamePropertyId:
@@ -1641,10 +1706,15 @@ func _GetPropertyValue(pThis uintptr, propIDArg uintptr, retVal *windows.Variant
 	case windows.UIA_NativeWindowHandlePropertyId:
 		retVal.SetInt32(int32(this.semantic.hwnd))
 	case windows.UIA_IsControlElementPropertyId:
+		// setting to `this.node.Desc.Class != semantic.Unknown` hangs UIA verifier
 		retVal.SetBool(true)
 	case windows.UIA_IsContentElementPropertyId:
+		// setting to `this.node.Desc.Class != semantic.Unknown` hangs UIA verifier
 		retVal.SetBool(true)
-
+	case windows.UIA_FrameworkIdPropertyId:
+		retVal.SetString("Gio")
+	case windows.UIA_AutomationIdPropertyId:
+		retVal.SetString(fmt.Sprintf("GioNode_%d", this.node.ID))
 	}
 
 	return windows.S_OK
@@ -1670,7 +1740,6 @@ func mapGioClassToUIA(c semantic.ClassOp) windows.UiaControlTypeId {
 }
 
 func _Get_BoundingRectangle(pThis uintptr, rect *windows.UiaRect) uintptr {
-
 	this := FromFragmentPointer(pThis)
 
 	if rect == nil {
@@ -1681,16 +1750,24 @@ func _Get_BoundingRectangle(pThis uintptr, rect *windows.UiaRect) uintptr {
 
 	windows.ScreenToClient(this.semantic.hwnd, &np)
 
-	rect.Top = float64(this.node.Desc.Bounds.Min.Y - int(np.Y))
-	rect.Left = float64(this.node.Desc.Bounds.Min.X - int(np.X))
-	rect.Width = float64(this.node.Desc.Bounds.Max.X)
-	rect.Height = float64(this.node.Desc.Bounds.Max.Y)
+	if this.IsRoot() {
+		windowDims := windows.GetWindowRect(this.semantic.hwnd)
+
+		rect.Top = float64(windowDims.Top)
+		rect.Left = float64(windowDims.Left)
+		rect.Width = float64(windowDims.Right - windowDims.Left)
+		rect.Height = float64(windowDims.Bottom - windowDims.Top)
+	} else {
+		rect.Top = float64(this.node.Desc.Bounds.Min.Y - int(np.Y))
+		rect.Left = float64(this.node.Desc.Bounds.Min.X - int(np.X))
+		rect.Width = float64(this.node.Desc.Bounds.Max.X)
+		rect.Height = float64(this.node.Desc.Bounds.Max.Y)
+	}
 
 	return windows.S_OK
 }
 
 func _Get_FragmentRoot(pThis uintptr, retVal *uintptr) uintptr {
-
 	this := FromFragmentPointer(pThis)
 
 	if retVal == nil {
@@ -1708,13 +1785,27 @@ func _Get_FragmentRoot(pThis uintptr, retVal *uintptr) uintptr {
 }
 
 func _GetEmbeddedFragmentRoots(pThis uintptr, retVal *uintptr) uintptr {
-
+	this := FromFragmentPointer(pThis)
 	if retVal == nil {
 		return windows.E_INVALIDARG
 	}
 
 	*retVal = 0
 	return windows.S_OK
+}
+
+func (node *UIANode) GetRuntimeId() (*windows.SAFEARRAY, error) {
+	rId := [2]uint{windows.UiaAppendRuntimeId, uint(node.node.ID)}
+	psa, err := windows.SafeArrayCreateVector(windows.VT_INT, 0, 2)
+	if err != nil {
+		return nil, err
+	}
+
+	for i := range rId {
+		windows.SafeArrayPutElement(psa, i, rId[i])
+	}
+
+	return psa, nil
 }
 
 func _GetRuntimeId(pThis uintptr, retVal *uintptr) uintptr {
@@ -1724,14 +1815,9 @@ func _GetRuntimeId(pThis uintptr, retVal *uintptr) uintptr {
 		return windows.E_POINTER
 	}
 
-	rId := [2]uint{windows.UiaAppendRuntimeId, uint(this.node.ID)}
-	psa, err := windows.SafeArrayCreateVector(windows.VT_INT, 0, 2)
+	psa, err := this.GetRuntimeId()
 	if err != nil {
 		return windows.E_OUTOFMEMORY
-	}
-
-	for i := 0; i < 2; i++ {
-		windows.SafeArrayPutElement(psa, uint64(i), uintptr(unsafe.Pointer(&(rId[i]))))
 	}
 
 	*retVal = uintptr(unsafe.Pointer(psa))
@@ -1739,88 +1825,45 @@ func _GetRuntimeId(pThis uintptr, retVal *uintptr) uintptr {
 }
 
 func _Navigate(pThis uintptr, direction windows.NavigateDirection, retVal *uintptr) uintptr {
-
 	this := FromFragmentPointer(pThis)
 
 	if retVal == nil {
-		return windows.E_INVALIDARG
+		return windows.E_POINTER
 	}
-
 	*retVal = 0
 
-	var resultID input.SemanticID
-
+	var nodeFound *UIANode
 	switch direction {
-	case windows.NavigateDirection_FirstChild:
-
-		if len(this.node.Children) > 0 {
-			child := this.node.Children[0]
-			resultID = child.ID
-
-		} else {
-
-		}
-	case windows.NavigateDirection_LastChild:
-
-		if len(this.node.Children) > 0 {
-			child := this.node.Children[len(this.node.Children)-1]
-			resultID = child.ID
-
-		}
-	case windows.NavigateDirection_NextSibling:
-
-		if !this.IsRoot() {
-			parent, ok := this.semantic.Get(this.node.ParentID)
-			if ok {
-				for i := range parent.node.Children {
-					if parent.node.Children[i].ID == this.node.ID {
-						if (i + 1) < len(parent.node.Children) {
-							resultID = parent.node.Children[i+1].ID
-
-						}
-						break
-					}
-				}
-			}
-		}
 	case windows.NavigateDirection_Parent:
-		if this.IsRoot() {
-
-			*retVal = 0
-			return windows.S_OK
-		}
-		resultID = this.node.ParentID
-	case windows.NavigateDirection_PreviousSibling:
-
 		if !this.IsRoot() {
-			parent, ok := this.semantic.Get(this.node.ParentID)
-			if ok {
-				for i := range parent.node.Children {
-					if parent.node.Children[i].ID == this.node.ID {
-						if (i - 1) >= 0 {
-							resultID = parent.node.Children[i-1].ID
-
-						}
-						break
-					}
-				}
-			}
+			nodeFound = this.GetParent()
+		}
+	case windows.NavigateDirection_FirstChild:
+		nodeFound = this.GetChild(0)
+	case windows.NavigateDirection_LastChild:
+		nodeFound = this.GetChild(len(this.node.Children) - 1)
+	case windows.NavigateDirection_NextSibling:
+		if !this.IsRoot() {
+			nodeFound = this.GetRightSibling()
+		}
+	case windows.NavigateDirection_PreviousSibling:
+		if !this.IsRoot() {
+			nodeFound = this.GetLeftSibling()
 		}
 	}
 
-	if resultID != 0 {
-		resultNode, ok := this.semantic.Get(resultID)
-		if ok {
-			*retVal = resultNode.ToFragmentPointer()
-			resultNode.AddRef()
-		}
+	if nodeFound != nil {
+		*retVal = nodeFound.ToFragmentPointer()
+		nodeFound.AddRef()
 	}
 
 	return windows.S_OK
 }
 
 func _SetFocus(pThis uintptr) uintptr {
-	// FIXME: implement
+	this := FromFragmentPointer(pThis)
+	this.semantic.focus = this.node.ID
+
 	return windows.S_OK
 }
 
@@ -1847,16 +1890,19 @@ func _ElementProviderFromPoint(pThis uintptr, x, y uintptr, retVal *uintptr) uin
 }
 
 func _GetFocus(pThis uintptr, retVal *uintptr) uintptr {
-	// this := FromFragmentRootPointer(pThis)
-
-	fmt.Fprintln(os.Stderr, "_GetFocus called - returning NULL")
+	this := FromFragmentRootPointer(pThis)
 
 	if retVal == nil {
 		return windows.E_POINTER
 	}
-
-	// Return NULL - no focus tracking yet
 	*retVal = 0
+
+	node, ok := this.semantic.Get(this.semantic.focus)
+	if ok {
+		*retVal = node.ToFragmentPointer()
+		node.AddRef()
+	}
+
 	return windows.S_OK
 }
 
@@ -2021,31 +2067,12 @@ func (sem *UIASemantic) InsertOrUpdate(node input.SemanticNode) {
 	if !exists {
 		uiaNode := newNode(node, sem)
 		sem.shadowTree[node.ID] = uiaNode
-
-		// DON'T raise ChildAdded - this causes Windows to cache all nodes without understanding hierarchy
-		// Let Windows discover nodes via Navigate(FirstChild/NextSibling) instead
-		// windows.UiaRaiseStructureChangedEvent(unsafe.Pointer(uiaNode.ToSimplePointer()), windows.StructureChangeType_ChildAdded, nil, 0)
-
-		for _, child := range node.Children {
-			sem.InsertOrUpdate(child)
-		}
 	} else {
-		// Node already exists - update it
-		oldNode := old.node
-		old.node = node
+		old.Update(node)
+	}
 
-		// ONLY raise ChildrenInvalidated for ROOT when its children change
-		// This tells Windows to re-discover the entire tree via Navigate
-		if node.ID == sem.root && !slices.EqualFunc(oldNode.Children, node.Children, func(s1, s2 input.SemanticNode) bool {
-			return s1.ID == s2.ID
-		}) {
-
-			windows.UiaRaiseStructureChangedEvent(unsafe.Pointer(old.ToSimplePointer()), windows.StructureChangeType_ChildrenInvalidated, nil, 0)
-		}
-
-		for _, child := range node.Children {
-			sem.InsertOrUpdate(child)
-		}
+	for _, child := range node.Children {
+		sem.InsertOrUpdate(child)
 	}
 }
 
@@ -2053,11 +2080,21 @@ func (sem *UIASemantic) Delete(id input.SemanticID) {
 	node, exists := sem.shadowTree[id]
 	if exists {
 		windows.UiaRaiseStructureChangedEvent(unsafe.Pointer(node.ToSimplePointer()), windows.StructureChangeType_ChildRemoved, nil, 0)
-		delete(sem.shadowTree, id)
 	}
 }
 
 func (sem *UIASemantic) Get(id input.SemanticID) (*UIANode, bool) {
 	node, ok := sem.shadowTree[id]
 	return node, ok
+}
+
+func printTree(indent int, n input.SemanticNode) {
+	for range indent {
+		fmt.Print("\t")
+	}
+
+	fmt.Printf("%d: %+v\n", n.ID, n.Desc)
+	for _, c := range n.Children {
+		printTree(indent+1, c)
+	}
 }
