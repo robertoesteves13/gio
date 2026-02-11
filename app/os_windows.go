@@ -1626,8 +1626,13 @@ func (node *UIANode) Release() uintptr {
 }
 
 func _get_HostRawElementProvider(pThis uintptr, retVal *uintptr) uintptr {
+	this := FromSimplePointer(pThis)
 	if retVal == nil {
 		return windows.E_INVALIDARG
+	}
+
+	if this.IsRoot() {
+		return windows.UiaHostProviderFromHwnd(this.semantic.hwnd, retVal)
 	}
 
 	*retVal = 0
@@ -1704,7 +1709,9 @@ func _GetPropertyValue(pThis uintptr, propIDArg uintptr, retVal *windows.Variant
 	case windows.UIA_SelectionItemIsSelectedPropertyId:
 		retVal.SetBool(this.node.Desc.Selected)
 	case windows.UIA_NativeWindowHandlePropertyId:
-		retVal.SetInt32(int32(this.semantic.hwnd))
+		if this.IsRoot() {
+			retVal.SetInt32(int32(this.semantic.hwnd))
+		}
 	case windows.UIA_IsControlElementPropertyId:
 		// setting to `this.node.Desc.Class != semantic.Unknown` hangs UIA verifier
 		retVal.SetBool(true)
@@ -1785,7 +1792,6 @@ func _Get_FragmentRoot(pThis uintptr, retVal *uintptr) uintptr {
 }
 
 func _GetEmbeddedFragmentRoots(pThis uintptr, retVal *uintptr) uintptr {
-	this := FromFragmentPointer(pThis)
 	if retVal == nil {
 		return windows.E_INVALIDARG
 	}
@@ -1795,8 +1801,8 @@ func _GetEmbeddedFragmentRoots(pThis uintptr, retVal *uintptr) uintptr {
 }
 
 func (node *UIANode) GetRuntimeId() (*windows.SAFEARRAY, error) {
-	rId := [2]uint{windows.UiaAppendRuntimeId, uint(node.node.ID)}
-	psa, err := windows.SafeArrayCreateVector(windows.VT_INT, 0, 2)
+	rId := [2]int32{windows.UiaAppendRuntimeId, int32(node.node.ID)}
+	psa, err := windows.SafeArrayCreateVector(windows.VT_I4, 0, 2)
 	if err != nil {
 		return nil, err
 	}
