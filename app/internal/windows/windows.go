@@ -667,20 +667,11 @@ type UiaChangeInfo struct {
 type SAFEARRAYBOUND struct {
 	_ structs.HostLayout
 
-	cElements uint64
-	lLbound   int64
+	cElements uint32
+	lLbound   int32
 }
 
-type SAFEARRAY struct {
-	_ structs.HostLayout
-
-	cDims      uint16
-	fFeatures  SAFEARRAY_FLAGS
-	cbElements uint64
-	cLocks     uint64
-	pvData     uintptr
-	rgsabound  [1]SAFEARRAYBOUND
-}
+type SAFEARRAY uintptr
 
 type SAFEARRAY_FLAGS uint16
 
@@ -1233,28 +1224,26 @@ func SafeArrayCreate(vt VARIANT_TYPE, cDims uint32, rgsabound *SAFEARRAYBOUND) (
 	return sa, nil
 }
 
-func SafeArrayCreateVector(vt VARIANT_TYPE, lLbound int64, cElements uint64) (*SAFEARRAY, error) {
-	r, _, err := _SafeArrayCreateVector.Call(
+func SafeArrayCreateVector(vt VARIANT_TYPE, lLbound int32, cElements uint32) (SAFEARRAY, error) {
+	r, e, err := _SafeArrayCreateVector.Call(
 		uintptr(vt),
 		uintptr(lLbound),
 		uintptr(cElements),
 	)
 
-	sa, ok := any(r).(*SAFEARRAY)
-	if !ok {
-		return nil, fmt.Errorf("SafeArrayCreateVector failed: %v", err)
+	if e != 0 {
+		return 0, fmt.Errorf("SafeArrayCreateVector failed: %v", err)
 	}
 
+	sa := (SAFEARRAY)(unsafe.Pointer(r))
 	return sa, nil
 }
 
-func SafeArrayPutElement(sa *SAFEARRAY, rgIndices int, value any) error {
-	pv := unsafe.Pointer(&value)
-
+func SafeArrayPutElement(sa SAFEARRAY, rgIndices int32, value unsafe.Pointer) error {
 	r, _, _ := _SafeArrayPutElement.Call(
 		uintptr(unsafe.Pointer(sa)),
 		uintptr(unsafe.Pointer(&rgIndices)),
-		uintptr(pv),
+		uintptr(value),
 	)
 
 	if r != S_OK {

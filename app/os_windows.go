@@ -1618,9 +1618,9 @@ func (node *UIANode) QueryInterface(riid windows.GUID, rVal *uintptr) uintptr {
 func (node *UIANode) Release() uintptr {
 	newVal := atomic.AddInt64(&node.refCount, -1)
 
-	// if newVal == 0 {
-	// 	delete(node.semantic.shadowTree, node.node.ID)
-	// }
+	if newVal == 0 {
+		delete(node.semantic.shadowTree, node.node.ID)
+	}
 
 	return uintptr(newVal)
 }
@@ -1644,7 +1644,7 @@ func _get_ProviderOptions(pThis uintptr, retVal *windows.ProviderOptions) uintpt
 		return windows.E_INVALIDARG
 	}
 
-	*retVal = windows.ProviderOptions_ServerSideProvider
+	*retVal = windows.ProviderOptions_ServerSideProvider | windows.ProviderOptions_UseComThreading
 
 	return windows.S_OK
 }
@@ -1800,15 +1800,18 @@ func _GetEmbeddedFragmentRoots(pThis uintptr, retVal *uintptr) uintptr {
 	return windows.S_OK
 }
 
-func (node *UIANode) GetRuntimeId() (*windows.SAFEARRAY, error) {
-	rId := [2]int32{windows.UiaAppendRuntimeId, int32(node.node.ID)}
+func (node *UIANode) GetRuntimeId() (windows.SAFEARRAY, error) {
 	psa, err := windows.SafeArrayCreateVector(windows.VT_I4, 0, 2)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 
-	for i := range rId {
-		windows.SafeArrayPutElement(psa, i, rId[i])
+	appendVal := windows.UiaAppendRuntimeId
+	windows.SafeArrayPutElement(psa, 0, unsafe.Pointer(&appendVal))
+	windows.SafeArrayPutElement(psa, 1, unsafe.Pointer(&node.node.ID))
+	if err != nil {
+		fmt.Println(err)
+		return 0, err
 	}
 
 	return psa, nil
@@ -2073,6 +2076,7 @@ func (sem *UIASemantic) InsertOrUpdate(node input.SemanticNode) {
 	if !exists {
 		uiaNode := newNode(node, sem)
 		sem.shadowTree[node.ID] = uiaNode
+		windows.UiaRaiseStructureChangedEvent(unsafe.Pointer(uiaNode.ToSimplePointer()), windows.StructureChangeType_ChildAdded, nil, 0)
 	} else {
 		old.Update(node)
 	}
