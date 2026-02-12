@@ -248,7 +248,6 @@ type Variant struct {
 	Reserved2 uint16
 	Reserved3 uint16
 	Val       uintptr
-	_         uintptr // HACK: guarantee proper size on x64
 }
 
 type IUnknownVTable struct {
@@ -1926,16 +1925,21 @@ func (v *Variant) SetString(str string) {
 	v.Val = bstr
 }
 
+func (v *Variant) SetEmpty() {
+	v.VT = VT_EMPTY
+	v.Val = 0
+}
+
 func (v *Variant) ToGoValue() any {
 	switch v.VT {
 	case VT_I4:
 		return int32(v.Val)
 	case VT_BSTR:
-		return syscall.UTF16PtrToString((*uint16)(unsafe.Pointer(&v.Val)))
+		return syscall.UTF16PtrToString((*uint16)(unsafe.Pointer(v.Val)))
 	case VT_BOOL:
 		return v.Val != 0
 	case VT_UNKNOWN:
-		return unsafe.Pointer(&v.Val)
+		return unsafe.Pointer(v.Val)
 	default:
 		return nil
 	}

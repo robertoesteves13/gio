@@ -103,6 +103,10 @@ func newWindow(win *callbacks, options []Option) {
 		// Instead lock the thread so window messages arrive through
 		// unfiltered GetMessage calls.
 		runtime.LockOSThread()
+		windows.CoInitializeEx(0, windows.COINIT_APARTMENTTHREADED|windows.COINIT_DISABLE_OLE1DDE)
+		defer windows.CoUnintialize()
+
+		initVTables()
 
 		w := &window{
 			w: win,
@@ -134,10 +138,6 @@ func newWindow(win *callbacks, options []Option) {
 
 // initResources initializes the resources global.
 func initResources() error {
-	if err := windows.CoInitializeEx(0, windows.COINIT_APARTMENTTHREADED|windows.COINIT_DISABLE_OLE1DDE); err != nil {
-		return err
-	}
-
 	windows.SetProcessDPIAware()
 	hInst, err := windows.GetModuleHandle()
 	if err != nil {
@@ -354,8 +354,6 @@ func windowProc(hwnd syscall.Handle, msg uint32, wParam, lParam uintptr) uintptr
 			windows.ReleaseDC(w.hdc)
 			w.hdc = 0
 		}
-
-		windows.CoUnintialize()
 
 		// The system destroys the HWND for us.
 		w.hwnd = 0
@@ -1524,7 +1522,7 @@ func FromScrollPointer(ptr uintptr) *UIANode {
 	return (*UIANode)(unsafe.Pointer(ptr - offset))
 }
 
-var (
+func initVTables() {
 	globalSimpleVTable = windows.IRawElementProviderSimpleVTable{
 		IUnknownVTable: windows.IUnknownVTable{
 			AddRef:         gowindows.NewCallback(simple_AddRef),
@@ -1580,6 +1578,14 @@ var (
 		Get_Value:      gowindows.NewCallback(_get_Value),
 		Get_IsReadOnly: gowindows.NewCallback(_get_IsReadOnly),
 	}
+}
+
+var (
+	globalSimpleVTable       windows.IRawElementProviderSimpleVTable
+	globalFragmentVTable     windows.IRawElementProviderFragmentVTable
+	globalFragmentRootVTable windows.IRawElementProviderFragmentRootVTable
+	globalInvokeVTable       windows.IInvokeProviderVTable
+	globalValueVTable        windows.IValueProviderVTable
 )
 
 func (node *UIANode) AddRef() uintptr {
@@ -1603,6 +1609,24 @@ func (node *UIANode) QueryInterface(riid windows.GUID, rVal *uintptr) uintptr {
 	case windows.IID_IRawElementProviderFragmentRoot:
 		if node.FragmentRoot != nil {
 			*rVal = node.ToFragmentRootPointer()
+			node.AddRef()
+			return windows.S_OK
+		} else {
+			*rVal = 0
+			return windows.E_NOINTERFACE
+		}
+	case windows.IID_IInvokeProvider:
+		if node.Invoke != nil {
+			*rVal = node.ToInvokePointer()
+			node.AddRef()
+			return windows.S_OK
+		} else {
+			*rVal = 0
+			return windows.E_NOINTERFACE
+		}
+	case windows.IID_IValueProvider:
+		if node.Value != nil {
+			*rVal = node.ToValuePointer()
 			node.AddRef()
 			return windows.S_OK
 		} else {
@@ -1651,37 +1675,31 @@ func _get_ProviderOptions(pThis uintptr, retVal *windows.ProviderOptions) uintpt
 
 func _GetPatternProvider(pThis uintptr, patternIDArg uintptr, retVal *uintptr) uintptr {
 	this := FromSimplePointer(pThis)
+	_ = this
 
 	if retVal == nil {
 		return windows.E_POINTER
 	}
 
 	*retVal = 0
-
 	patternID := windows.UiaPatternId(patternIDArg)
 
 	switch patternID {
 	case windows.UIA_InvokePatternId:
-		if (this.node.Desc.Gestures & input.ClickGesture) != 0 {
+		if this.Invoke != nil {
 			*retVal = this.ToInvokePointer()
 			this.AddRef()
-
 		}
-	// case windows.UIA_ScrollPatternId:
-	// 	if (this.node.Desc.Gestures & input.ScrollGesture) != 0 {
-	// 		*retVal = this.ToScrollPointer()
-	//
-	// 	}
+	case windows.UIA_ScrollPatternId:
+		if this.Scroll != nil {
+			*retVal = this.ToScrollPointer()
+			this.AddRef()
+		}
 	case windows.UIA_ValuePatternId:
-		if this.node.Desc.Class == semantic.Editor {
+		if this.Value != nil {
 			*retVal = this.ToValuePointer()
 			this.AddRef()
-
 		}
-	}
-
-	if *retVal != 0 {
-		this.AddRef()
 	}
 
 	return windows.S_OK
@@ -1722,6 +1740,10 @@ func _GetPropertyValue(pThis uintptr, propIDArg uintptr, retVal *windows.Variant
 		retVal.SetString("Gio")
 	case windows.UIA_AutomationIdPropertyId:
 		retVal.SetString(fmt.Sprintf("GioNode_%d", this.node.ID))
+	case windows.UIA_IsDialogPropertyId:
+		retVal.SetBool(false)
+	default:
+		retVal.SetEmpty()
 	}
 
 	return windows.S_OK
@@ -1923,11 +1945,11 @@ func _Invoke(pThis uintptr) uintptr {
 	return windows.S_OK
 }
 
-func _get_IsReadOnly(pThis uintptr, retVal *uintptr) uintptr {
+func _get_IsReadOnly(pThis uintptr, retVal *int32) uintptr {
 	this := FromValuePointer(pThis)
 
 	if !this.node.Desc.Disabled {
-		*retVal = ^uintptr(0)
+		*retVal = 1
 	} else {
 		*retVal = 0
 	}
@@ -1940,16 +1962,16 @@ func _get_Value(pThis uintptr, retVal **uint16) uintptr {
 
 	bstr, err := windows.SysAllocString(this.node.Desc.Label)
 	if err != nil {
+		fmt.Println(err)
 		return windows.E_OUTOFMEMORY
 	}
 
-	*retVal = (*uint16)(unsafe.Pointer(&bstr))
+	*retVal = (*uint16)(unsafe.Pointer(bstr))
 	return windows.S_OK
 }
 
 func _SetValue(pThis uintptr, val *uint16) uintptr {
-	// this := FromValuePointer(pThis)
-	return windows.E_NOTIMPL
+	return windows.S_OK
 }
 
 func simple_AddRef(pThis uintptr) uintptr {
