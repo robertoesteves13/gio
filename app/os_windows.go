@@ -59,7 +59,7 @@ type window struct {
 	frameDims image.Point
 	loop      *eventLoop
 
-	semantic UIASemantic
+	semantic uiaSemantic
 }
 
 const _WM_WAKEUP = windows.WM_USER + iota
@@ -113,7 +113,7 @@ func newWindow(win *callbacks, options []Option) {
 		}
 
 		w.semantic.diffsID = make([]input.SemanticID, 0)
-		w.semantic.shadowTree = make(map[input.SemanticID]*UIANode)
+		w.semantic.shadowTree = make(map[input.SemanticID]*uiaNode)
 		w.loop = newEventLoop(w.w, w.wakeup)
 		w.w.SetDriver(w)
 		err := w.init()
@@ -1343,7 +1343,7 @@ func (w *window) handleUIAutomation() {
 	}
 }
 
-type UIANode struct {
+type uiaNode struct {
 	_ structs.HostLayout
 
 	Simple       *windows.IRawElementProviderSimpleVTable
@@ -1356,11 +1356,11 @@ type UIANode struct {
 	refCount int64
 
 	node     input.SemanticNode
-	semantic *UIASemantic
+	semantic *uiaSemantic
 }
 
-func newNode(node input.SemanticNode, sem *UIASemantic) *UIANode {
-	this := &UIANode{node: node, refCount: 1, semantic: sem}
+func newNode(node input.SemanticNode, sem *uiaSemantic) *uiaNode {
+	this := &uiaNode{node: node, refCount: 1, semantic: sem}
 
 	this.Simple = &globalSimpleVTable
 
@@ -1377,10 +1377,14 @@ func newNode(node input.SemanticNode, sem *UIASemantic) *UIANode {
 		this.Value = &globalValueVTable
 	}
 
+	if (node.Desc.Gestures & input.ScrollGesture) != 0 {
+		this.Scroll = &globalScrollVTable
+	}
+
 	return this
 }
 
-func (node *UIANode) Update(newNode input.SemanticNode) {
+func (node *uiaNode) Update(newNode input.SemanticNode) {
 	oldNode := node.node
 	node.node = newNode
 
@@ -1405,7 +1409,7 @@ func (node *UIANode) Update(newNode input.SemanticNode) {
 	// }
 }
 
-func (node *UIANode) GetParent() *UIANode {
+func (node *uiaNode) GetParent() *uiaNode {
 	if n, ok := node.semantic.Get(node.node.ParentID); ok {
 		return n
 	}
@@ -1413,7 +1417,7 @@ func (node *UIANode) GetParent() *UIANode {
 	return nil
 }
 
-func (node *UIANode) GetChild(idx int) *UIANode {
+func (node *uiaNode) GetChild(idx int) *uiaNode {
 	if idx < 0 || idx >= len(node.node.Children) {
 		return nil
 	}
@@ -1426,7 +1430,7 @@ func (node *UIANode) GetChild(idx int) *UIANode {
 	return nil
 }
 
-func (node *UIANode) GetLeftSibling() *UIANode {
+func (node *uiaNode) GetLeftSibling() *uiaNode {
 	if parent, ok := node.semantic.Get(node.node.ParentID); ok {
 		i := node.getParentIdxLocation(parent.node)
 		if i > 0 {
@@ -1437,7 +1441,7 @@ func (node *UIANode) GetLeftSibling() *UIANode {
 	return nil
 }
 
-func (node *UIANode) GetRightSibling() *UIANode {
+func (node *uiaNode) GetRightSibling() *uiaNode {
 	if parent, ok := node.semantic.Get(node.node.ParentID); ok {
 		i := node.getParentIdxLocation(parent.node)
 		if i >= 0 && i+1 < len(parent.node.Children) {
@@ -1448,7 +1452,7 @@ func (node *UIANode) GetRightSibling() *UIANode {
 	return nil
 }
 
-func (node *UIANode) getParentIdxLocation(parent input.SemanticNode) int {
+func (node *uiaNode) getParentIdxLocation(parent input.SemanticNode) int {
 	for i, c := range parent.Children {
 		if c.ID == node.node.ID {
 			return i
@@ -1458,68 +1462,68 @@ func (node *UIANode) getParentIdxLocation(parent input.SemanticNode) int {
 	return -1
 }
 
-func (node *UIANode) IsRoot() bool {
+func (node *uiaNode) IsRoot() bool {
 	return node.node.ID == node.semantic.root
 }
 
-func (node *UIANode) ToSimplePointer() uintptr {
-	offset := unsafe.Offsetof(UIANode{}.Simple)
+func (node *uiaNode) ToSimplePointer() uintptr {
+	offset := unsafe.Offsetof(uiaNode{}.Simple)
 	return uintptr(unsafe.Pointer(node)) + offset
 }
 
-func (node *UIANode) ToFragmentPointer() uintptr {
-	offset := unsafe.Offsetof(UIANode{}.Fragment)
+func (node *uiaNode) ToFragmentPointer() uintptr {
+	offset := unsafe.Offsetof(uiaNode{}.Fragment)
 	return uintptr(unsafe.Pointer(node)) + offset
 }
 
-func (node *UIANode) ToFragmentRootPointer() uintptr {
-	offset := unsafe.Offsetof(UIANode{}.FragmentRoot)
+func (node *uiaNode) ToFragmentRootPointer() uintptr {
+	offset := unsafe.Offsetof(uiaNode{}.FragmentRoot)
 	return uintptr(unsafe.Pointer(node)) + offset
 }
 
-func (node *UIANode) ToInvokePointer() uintptr {
-	offset := unsafe.Offsetof(UIANode{}.Invoke)
+func (node *uiaNode) ToInvokePointer() uintptr {
+	offset := unsafe.Offsetof(uiaNode{}.Invoke)
 	return uintptr(unsafe.Pointer(node)) + offset
 }
 
-func (node *UIANode) ToValuePointer() uintptr {
-	offset := unsafe.Offsetof(UIANode{}.Value)
+func (node *uiaNode) ToValuePointer() uintptr {
+	offset := unsafe.Offsetof(uiaNode{}.Value)
 	return uintptr(unsafe.Pointer(node)) + offset
 }
 
-func (node *UIANode) ToScrollPointer() uintptr {
-	offset := unsafe.Offsetof(UIANode{}.Scroll)
+func (node *uiaNode) ToScrollPointer() uintptr {
+	offset := unsafe.Offsetof(uiaNode{}.Scroll)
 	return uintptr(unsafe.Pointer(node)) + offset
 }
 
-func FromSimplePointer(ptr uintptr) *UIANode {
-	offset := unsafe.Offsetof(UIANode{}.Simple)
-	return (*UIANode)(unsafe.Pointer(ptr - offset))
+func FromSimplePointer(ptr uintptr) *uiaNode {
+	offset := unsafe.Offsetof(uiaNode{}.Simple)
+	return (*uiaNode)(unsafe.Pointer(ptr - offset))
 }
 
-func FromFragmentPointer(ptr uintptr) *UIANode {
-	offset := unsafe.Offsetof(UIANode{}.Fragment)
-	return (*UIANode)(unsafe.Pointer(ptr - offset))
+func FromFragmentPointer(ptr uintptr) *uiaNode {
+	offset := unsafe.Offsetof(uiaNode{}.Fragment)
+	return (*uiaNode)(unsafe.Pointer(ptr - offset))
 }
 
-func FromFragmentRootPointer(ptr uintptr) *UIANode {
-	offset := unsafe.Offsetof(UIANode{}.FragmentRoot)
-	return (*UIANode)(unsafe.Pointer(ptr - offset))
+func FromFragmentRootPointer(ptr uintptr) *uiaNode {
+	offset := unsafe.Offsetof(uiaNode{}.FragmentRoot)
+	return (*uiaNode)(unsafe.Pointer(ptr - offset))
 }
 
-func FromInvokePointer(ptr uintptr) *UIANode {
-	offset := unsafe.Offsetof(UIANode{}.Invoke)
-	return (*UIANode)(unsafe.Pointer(ptr - offset))
+func FromInvokePointer(ptr uintptr) *uiaNode {
+	offset := unsafe.Offsetof(uiaNode{}.Invoke)
+	return (*uiaNode)(unsafe.Pointer(ptr - offset))
 }
 
-func FromValuePointer(ptr uintptr) *UIANode {
-	offset := unsafe.Offsetof(UIANode{}.Value)
-	return (*UIANode)(unsafe.Pointer(ptr - offset))
+func FromValuePointer(ptr uintptr) *uiaNode {
+	offset := unsafe.Offsetof(uiaNode{}.Value)
+	return (*uiaNode)(unsafe.Pointer(ptr - offset))
 }
 
-func FromScrollPointer(ptr uintptr) *UIANode {
-	offset := unsafe.Offsetof(UIANode{}.Scroll)
-	return (*UIANode)(unsafe.Pointer(ptr - offset))
+func FromScrollPointer(ptr uintptr) *uiaNode {
+	offset := unsafe.Offsetof(uiaNode{}.Scroll)
+	return (*uiaNode)(unsafe.Pointer(ptr - offset))
 }
 
 func initVTables() {
@@ -1578,6 +1582,14 @@ func initVTables() {
 		Get_Value:      gowindows.NewCallback(_get_Value),
 		Get_IsReadOnly: gowindows.NewCallback(_get_IsReadOnly),
 	}
+
+	globalScrollVTable = windows.IScrollProviderVTable{
+		IUnknownVTable: windows.IUnknownVTable{
+			AddRef:         gowindows.NewCallback(scroll_AddRef),
+			QueryInterface: gowindows.NewCallback(scroll_QueryInterface),
+			Release:        gowindows.NewCallback(scroll_Release),
+		},
+	}
 }
 
 var (
@@ -1586,13 +1598,14 @@ var (
 	globalFragmentRootVTable windows.IRawElementProviderFragmentRootVTable
 	globalInvokeVTable       windows.IInvokeProviderVTable
 	globalValueVTable        windows.IValueProviderVTable
+	globalScrollVTable       windows.IScrollProviderVTable
 )
 
-func (node *UIANode) AddRef() uintptr {
+func (node *uiaNode) AddRef() uintptr {
 	return uintptr(atomic.AddInt64(&node.refCount, 1))
 }
 
-func (node *UIANode) QueryInterface(riid windows.GUID, rVal *uintptr) uintptr {
+func (node *uiaNode) QueryInterface(riid windows.GUID, rVal *uintptr) uintptr {
 	if rVal == nil {
 		return windows.E_INVALIDARG
 	}
@@ -1639,7 +1652,7 @@ func (node *UIANode) QueryInterface(riid windows.GUID, rVal *uintptr) uintptr {
 	}
 }
 
-func (node *UIANode) Release() uintptr {
+func (node *uiaNode) Release() uintptr {
 	newVal := atomic.AddInt64(&node.refCount, -1)
 
 	if newVal == 0 {
@@ -1822,7 +1835,7 @@ func _GetEmbeddedFragmentRoots(pThis uintptr, retVal *uintptr) uintptr {
 	return windows.S_OK
 }
 
-func (node *UIANode) GetRuntimeId() (windows.SAFEARRAY, error) {
+func (node *uiaNode) GetRuntimeId() (windows.SAFEARRAY, error) {
 	psa, err := windows.SafeArrayCreateVector(windows.VT_I4, 0, 2)
 	if err != nil {
 		return 0, err
@@ -1863,7 +1876,7 @@ func _Navigate(pThis uintptr, direction windows.NavigateDirection, retVal *uintp
 	}
 	*retVal = 0
 
-	var nodeFound *UIANode
+	var nodeFound *uiaNode
 	switch direction {
 	case windows.NavigateDirection_Parent:
 		if !this.IsRoot() {
@@ -1974,6 +1987,45 @@ func _SetValue(pThis uintptr, val *uint16) uintptr {
 	return windows.S_OK
 }
 
+func _Scroll(pThis uintptr, horizontal, vertical windows.ScrollAmount) uintptr {
+	this := FromScrollPointer(pThis)
+	amount := f32.Pt(0, 0)
+
+	switch horizontal {
+	case windows.ScrollAmount_LargeDecrement:
+		amount.X -= 120
+	case windows.ScrollAmount_SmallDecrement:
+		amount.X -= 50
+	case windows.ScrollAmount_SmallIncrement:
+		amount.X += 50
+	case windows.ScrollAmount_LargeIncrement:
+		amount.X += 120
+	}
+
+	switch vertical {
+	case windows.ScrollAmount_LargeDecrement:
+		amount.Y -= 120
+	case windows.ScrollAmount_SmallDecrement:
+		amount.Y -= 50
+	case windows.ScrollAmount_SmallIncrement:
+		amount.Y += 50
+	case windows.ScrollAmount_LargeIncrement:
+		amount.Y += 120
+	}
+
+	w, ok := winMap.Load(this.semantic.hwnd)
+	if ok {
+		w := w.(*window)
+		w.w.ProcessEvent(pointer.Event{
+			Kind:   pointer.Scroll,
+			Source: pointer.Mouse,
+			Scroll: amount,
+		})
+	}
+
+	return windows.S_OK
+}
+
 func simple_AddRef(pThis uintptr) uintptr {
 	this := FromSimplePointer(pThis)
 
@@ -2081,8 +2133,8 @@ func scroll_Release(pThis uintptr) uintptr {
 	return this.Release()
 }
 
-type UIASemantic struct {
-	shadowTree map[input.SemanticID]*UIANode
+type uiaSemantic struct {
+	shadowTree map[input.SemanticID]*uiaNode
 
 	hover input.SemanticID
 	focus input.SemanticID
@@ -2093,7 +2145,7 @@ type UIASemantic struct {
 	hwnd syscall.Handle
 }
 
-func (sem *UIASemantic) InsertOrUpdate(node input.SemanticNode) {
+func (sem *uiaSemantic) InsertOrUpdate(node input.SemanticNode) {
 	old, exists := sem.shadowTree[node.ID]
 	if !exists {
 		uiaNode := newNode(node, sem)
@@ -2108,25 +2160,14 @@ func (sem *UIASemantic) InsertOrUpdate(node input.SemanticNode) {
 	}
 }
 
-func (sem *UIASemantic) Delete(id input.SemanticID) {
+func (sem *uiaSemantic) Delete(id input.SemanticID) {
 	node, exists := sem.shadowTree[id]
 	if exists {
 		windows.UiaRaiseStructureChangedEvent(unsafe.Pointer(node.ToSimplePointer()), windows.StructureChangeType_ChildRemoved, nil, 0)
 	}
 }
 
-func (sem *UIASemantic) Get(id input.SemanticID) (*UIANode, bool) {
+func (sem *uiaSemantic) Get(id input.SemanticID) (*uiaNode, bool) {
 	node, ok := sem.shadowTree[id]
 	return node, ok
-}
-
-func printTree(indent int, n input.SemanticNode) {
-	for range indent {
-		fmt.Print("\t")
-	}
-
-	fmt.Printf("%d: %+v\n", n.ID, n.Desc)
-	for _, c := range n.Children {
-		printTree(indent+1, c)
-	}
 }

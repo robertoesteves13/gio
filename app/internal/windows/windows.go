@@ -296,6 +296,7 @@ var (
 	IID_IInvokeProvider                 = GUID{structs.HostLayout{}, 0x54fcb24b, 0xe18e, 0x47a2, 0xb4, 0xd3, 0xec, 0xcb, 0xe7, 0x75, 0x99, 0xa2}
 	IID_IValueProvider                  = GUID{structs.HostLayout{}, 0xc7935180, 0x6fb3, 0x4201, 0xb1, 0x74, 0x7d, 0xf7, 0x3a, 0xdb, 0xf6, 0x4a}
 	IID_IScrollProvider                 = GUID{structs.HostLayout{}, 0xb38b8077, 0x1fc3, 0x42a5, 0x8c, 0xae, 0xd4, 0x0c, 0x22, 0x15, 0x05, 0x5a}
+	IID_ITextProvider                   = GUID{structs.HostLayout{}, 0x3589c92c, 0x63f3, 0x4367, 0x99, 0xbb, 0xad, 0xa6, 0x53, 0xb7, 0x7c, 0xf2}
 )
 
 type UiaPatternId uint
@@ -691,6 +692,16 @@ const (
 	FADF_RESERVED    SAFEARRAY_FLAGS = 0xF008
 )
 
+type ScrollAmount uint
+
+const (
+	ScrollAmount_LargeDecrement ScrollAmount = 0
+	ScrollAmount_SmallDecrement ScrollAmount = 1
+	ScrollAmount_NoAmount       ScrollAmount = 2
+	ScrollAmount_LargeIncrement ScrollAmount = 3
+	ScrollAmount_SmallIncrement ScrollAmount = 4
+)
+
 type IRawElementProviderSimpleVTable struct {
 	_ structs.HostLayout
 	IUnknownVTable
@@ -749,6 +760,34 @@ type IScrollProviderVTable struct {
 	Get_VerticalViewSize        uintptr
 	Get_HorizontallyScrollable  uintptr
 	Get_VerticallyScrollable    uintptr
+}
+
+type ITextProviderVTable struct {
+	_ structs.HostLayout
+	IUnknownVTable
+
+	GetSelection           uintptr
+	GetVisibleRanges       uintptr
+	RangeFromChild         uintptr
+	RangeFromPoint         uintptr
+	DocumentRange          uintptr
+	SupportedTextSelection uintptr
+}
+
+type ITogglePatternVTable struct {
+	_ structs.HostLayout
+	IUnknownVTable
+
+	Toggle uintptr
+}
+
+type ISelectionProviderVTable struct {
+	_ structs.HostLayout
+	IUnknownVTable
+
+	GetSelection        uintptr
+	CanSelectMultiple   uintptr
+	IsSelectionRequired uintptr
 }
 
 type SemanticVTable struct {
